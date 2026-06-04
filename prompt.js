@@ -1,135 +1,51 @@
-import express from "express";
-import Anthropic from "@anthropic-ai/sdk";
-import { catalog } from "../catalog/imoveis.js";
-import { sessionManager } from "./sessions.js";
-import { sendWhatsAppMessage, sendWhatsAppTemplate } from "./whatsapp.js";
-import { buildSystemPrompt } from "./prompt.js";
-import { detectHandoffTrigger, formatHandoffAlert } from "./handoff.js";
+import { formatCatalogForPrompt } from "../catalog/imoveis.js";
 
-const app = express();
-app.use(express.json());
+/**
+ * buildSystemPrompt(catalog)
+ * Gera o system prompt injetando o catálogo atualizado.
+ * Chamado a cada requisição para garantir dados frescos.
+ */
+export function buildSystemPrompt(catalog) {
+  const catalogText = formatCatalogForPrompt(catalog);
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return `Você é o assistente virtual da ${catalog.construtora.nome}, uma construtora e imobiliária localizada em ${catalog.construtora.cidade}.
 
-// ─── Verificação do Webhook (Meta) ────────────────────────────────────────────
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
-    res.send(req.query["hub.challenge"]);
-  } else {
-    res.sendStatus(403);
-  }
-});
+Seu nome é "Ana" e você faz atendimento pelo WhatsApp. Seu papel é:
+1. Apresentar os imóveis disponíveis de forma clara e atraente
+2. Responder dúvidas sobre financiamento, FGTS, documentação e prazos
+3. Qualificar o interesse do cliente (quantos quartos deseja, faixa de renda, tem FGTS?)
+4. Agendar visitas e capturar leads para os corretores
+5. Resolver dúvidas simples sem precisar transferir para humano
 
-// ─── Recebimento de Mensagens ─────────────────────────────────────────────────
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // responde imediatamente para evitar timeout da Meta
+───────────────────────────────────────────────
+REGRAS DE COMPORTAMENTO:
+- Responda sempre em português brasileiro, de forma cordial, direta e profissional
+- Mensagens curtas (máx. 3 parágrafos por resposta no WhatsApp)
+- Use emojis com moderação (no máximo 2 por mensagem)
+- Nunca invente informações — se não souber, diga que vai verificar com o time
+- Nunca cite preços de unidades reservadas ou não listadas
+- Se o cliente perguntar sobre documentação específica de uma unidade já vendida, diga que aquela unidade não está mais disponível
+- Quando o cliente demonstrar intenção de compra séria, sugira falar com um consultor
 
-  const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
-  const message = entry?.messages?.[0];
-  if (!message || message.type !== "text") return;
+QUANDO TRANSFERIR PARA HUMANO:
+- Cliente pede explicitamente para falar com pessoa
+- Cliente menciona proposta, FGTS liberado ou financiamento aprovado
+- Reclamações ou situações de conflito
+- Dúvidas jurídicas ou contratuais detalhadas
 
-  const phone = message.from;
-  const userText = message.text.body.trim();
+HORÁRIO DE ATENDIMENTO HUMANO:
+Segunda a sexta: 8h às 18h | Sábado: 8h às 13h
+Fora desse horário, informe que um consultor retornará no próximo dia útil.
 
-  console.log(`[${phone}] → ${userText}`);
+───────────────────────────────────────────────
+${catalogText}
+───────────────────────────────────────────────
 
-  try {
-    // 1. Carrega/cria sessão do cliente
-    const session = sessionManager.get(phone);
+COMO APRESENTAR IMÓVEIS:
+- Destaque sempre os diferenciais do programa (Minha Casa Minha Vida, documentação regularizada)
+- Mencione a possibilidade de usar FGTS sempre que relevante
+- Para clientes com perfil MCMV, enfatize a entrada acessível e as parcelas
+- Sempre termine com uma pergunta ou CTA (ex: "Posso agendar uma visita rápida para você conhecer?")
 
-    // 2. Se está em modo "aguardando humano", ignora bot
-    if (session.waitingForHuman) {
-      console.log(`[${phone}] Em espera de atendente — bot pausado.`);
-      return;
-    }
-
-    // 3. Adiciona mensagem do usuário ao histórico
-    session.addMessage("user", userText);
-
-    // 4. Detecta se é pedido urgente de falar com humano
-    const handoffRequest = detectHandoffTrigger(userText);
-    if (handoffRequest) {
-      session.waitingForHuman = true;
-      sessionManager.save(phone, session);
-
-      await sendWhatsAppMessage(
-        phone,
-        "Entendido! 🙋 Vou chamar um de nossos consultores agora. Em instantes alguém entrará em contato com você. Aguarde um momento."
-      );
-
-      // Notifica o time interno (número do corretor/gerente)
-      await notifyTeam(phone, session, handoffRequest);
-      return;
-    }
-
-    // 5. Chama Claude com histórico completo
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: buildSystemPrompt(catalog),
-      messages: session.getHistory(),
-    });
-
-    const reply = response.content[0].text;
-
-    // 6. Salva resposta no histórico
-    session.addMessage("assistant", reply);
-    sessionManager.save(phone, session);
-
-    // 7. Envia resposta ao cliente
-    await sendWhatsAppMessage(phone, reply);
-
-    // 8. Detecta intenção de visita/proposta e envia template CTA
-    if (/agendar|visita|proposta|interesse|quero ver/i.test(userText)) {
-      await sendLeadCTA(phone, session);
-    }
-
-  } catch (err) {
-    console.error(`[${phone}] Erro:`, err.message);
-    await sendWhatsAppMessage(
-      phone,
-      "Desculpe, tive um problema técnico momentâneo. Pode repetir sua mensagem? 🙏"
-    );
-  }
-});
-
-// ─── Notificação interna de handoff ───────────────────────────────────────────
-async function notifyTeam(phone, session, reason) {
-  const TEAM_NUMBER = process.env.TEAM_PHONE_NUMBER; // ex: "5562999999999"
-  if (!TEAM_NUMBER) return;
-
-  const alert = formatHandoffAlert(phone, session, reason);
-  await sendWhatsAppMessage(TEAM_NUMBER, alert);
+Lembre-se: você representa uma construtora séria de Goiânia. Cada conversa é um lead valioso. Seja atencioso(a) e eficiente.`;
 }
-
-// ─── CTA de agendamento ────────────────────────────────────────────────────────
-async function sendLeadCTA(phone, session) {
-  // Aguarda 2s para não parecer automático demais
-  await new Promise(r => setTimeout(r, 2000));
-  await sendWhatsAppMessage(
-    phone,
-    "📅 Posso agendar uma visita sem compromisso para você conhecer pessoalmente! Quer que eu passe para um consultor confirmar o melhor horário?"
-  );
-}
-
-// ─── Endpoint para o corretor retomar atendimento ─────────────────────────────
-app.post("/handoff/resolve/:phone", (req, res) => {
-  const phone = req.params.phone;
-  const session = sessionManager.get(phone);
-  session.waitingForHuman = false;
-  sessionManager.save(phone, session);
-  res.json({ ok: true, message: `Bot reativado para ${phone}` });
-});
-
-// ─── Status / health check ────────────────────────────────────────────────────
-app.get("/status", (req, res) => {
-  res.json({
-    status: "online",
-    sessions: sessionManager.count(),
-    uptime: process.uptime(),
-  });
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🤖 Bot imobiliário rodando na porta", process.env.PORT || 3000);
-});

@@ -1,110 +1,135 @@
-/**
- * imoveis.js
- * Catálogo de empreendimentos e unidades disponíveis.
- * Edite este arquivo para atualizar disponibilidade e preços.
- */
+import express from "express";
+import Anthropic from "@anthropic-ai/sdk";
+import { catalog } from "../catalog/imoveis.js";
+import { sessionManager } from "./sessions.js";
+import { sendWhatsAppMessage, sendWhatsAppTemplate } from "./whatsapp.js";
+import { buildSystemPrompt } from "./prompt.js";
+import { detectHandoffTrigger, formatHandoffAlert } from "./handoff.js";
 
-export const catalog = {
-  construtora: {
-    nome: "Construtora Ricardo Inácio",
-    cidade: "Goiânia/GO",
-    whatsapp: "5562XXXXXXXXX",
-    site: "www.suaconstrutora.com.br",
-  },
+const app = express();
+app.use(express.json());
 
-  empreendimentos: [
-    {
-      id: "monte-pascoal",
-      nome: "Residencial Monte Pascoal",
-      tipo: "Casa",
-      bairro: "Goiânia/GO",
-      endereco: "Rua RM-19, Lote 35, Quadra 18 — CEP 74494-480",
-      status: "Em entrega",
-      programa: "Minha Casa Minha Vida",
-      descricao:
-        "Residencial com casas individuais, entregues com documentação completa e financiamento Caixa Econômica Federal aprovado.",
-      unidades: [
-        {
-          id: "casa-01",
-          nome: "Casa nº 01",
-          status: "Reservada",
-          area: "48m²",
-          quartos: 2,
-          banheiros: 1,
-          vagas: 1,
-          preco: null, // reservada
-          matricula: "417.181",
-        },
-        {
-          id: "casa-02",
-          nome: "Casa nº 02",
-          status: "Disponível",
-          area: "48m²",
-          quartos: 2,
-          banheiros: 1,
-          vagas: 1,
-          preco: 185000,
-          matricula: "417.182",
-        },
-        {
-          id: "casa-03",
-          nome: "Casa nº 03",
-          status: "Disponível",
-          area: "52m²",
-          quartos: 2,
-          banheiros: 2,
-          vagas: 1,
-          preco: 198000,
-          matricula: "417.183",
-        },
-      ],
-      diferenciais: [
-        "Documentação 100% regularizada",
-        "Aceita FGTS e financiamento Caixa",
-        "Área murada e portão individual",
-        "Próximo a escolas e comércio",
-      ],
-    },
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    // ── Adicione mais empreendimentos aqui ─────────────────────────────────────
-    // {
-    //   id: "residencial-2",
-    //   nome: "Residencial XYZ",
-    //   ...
-    // },
-  ],
-};
+// ─── Verificação do Webhook (Meta) ────────────────────────────────────────────
+app.get("/webhook", (req, res) => {
+  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
+    res.send(req.query["hub.challenge"]);
+  } else {
+    res.sendStatus(403);
+  }
+});
 
-/**
- * Formata o catálogo como texto para o prompt do Claude.
- */
-export function formatCatalogForPrompt(catalog) {
-  const lines = [
-    `CONSTRUTORA: ${catalog.construtora.nome} — ${catalog.construtora.cidade}`,
-    "",
-    "=== EMPREENDIMENTOS DISPONÍVEIS ===",
-    "",
-  ];
+// ─── Recebimento de Mensagens ─────────────────────────────────────────────────
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200); // responde imediatamente para evitar timeout da Meta
 
-  for (const emp of catalog.empreendimentos) {
-    lines.push(`📍 ${emp.nome} (${emp.tipo}) — ${emp.bairro}`);
-    lines.push(`   Endereço: ${emp.endereco}`);
-    lines.push(`   Status: ${emp.status} | Programa: ${emp.programa}`);
-    lines.push(`   ${emp.descricao}`);
-    lines.push("   Unidades:");
+  const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
+  const message = entry?.messages?.[0];
+  if (!message || message.type !== "text") return;
 
-    for (const u of emp.unidades) {
-      const preco = u.preco
-        ? `R$ ${u.preco.toLocaleString("pt-BR")}`
-        : "Sob consulta";
-      lines.push(
-        `     • ${u.nome} — ${u.area}, ${u.quartos} qts, ${u.banheiros} bnh, ${u.vagas} vaga — ${u.status} — ${preco}`
-      );
+  const phone = message.from;
+  const userText = message.text.body.trim();
+
+  console.log(`[${phone}] → ${userText}`);
+
+  try {
+    // 1. Carrega/cria sessão do cliente
+    const session = sessionManager.get(phone);
+
+    // 2. Se está em modo "aguardando humano", ignora bot
+    if (session.waitingForHuman) {
+      console.log(`[${phone}] Em espera de atendente — bot pausado.`);
+      return;
     }
 
-    lines.push("   Diferenciais: " + emp.diferenciais.join(" | "));
-    lines.push("");
-  }
+    // 3. Adiciona mensagem do usuário ao histórico
+    session.addMessage("user", userText);
 
-  return lines.join("\n");
+    // 4. Detecta se é pedido urgente de falar com humano
+    const handoffRequest = detectHandoffTrigger(userText);
+    if (handoffRequest) {
+      session.waitingForHuman = true;
+      sessionManager.save(phone, session);
+
+      await sendWhatsAppMessage(
+        phone,
+        "Entendido! 🙋 Vou chamar um de nossos consultores agora. Em instantes alguém entrará em contato com você. Aguarde um momento."
+      );
+
+      // Notifica o time interno (número do corretor/gerente)
+      await notifyTeam(phone, session, handoffRequest);
+      return;
+    }
+
+    // 5. Chama Claude com histórico completo
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      system: buildSystemPrompt(catalog),
+      messages: session.getHistory(),
+    });
+
+    const reply = response.content[0].text;
+
+    // 6. Salva resposta no histórico
+    session.addMessage("assistant", reply);
+    sessionManager.save(phone, session);
+
+    // 7. Envia resposta ao cliente
+    await sendWhatsAppMessage(phone, reply);
+
+    // 8. Detecta intenção de visita/proposta e envia template CTA
+    if (/agendar|visita|proposta|interesse|quero ver/i.test(userText)) {
+      await sendLeadCTA(phone, session);
+    }
+
+  } catch (err) {
+    console.error(`[${phone}] Erro:`, err.message);
+    await sendWhatsAppMessage(
+      phone,
+      "Desculpe, tive um problema técnico momentâneo. Pode repetir sua mensagem? 🙏"
+    );
+  }
+});
+
+// ─── Notificação interna de handoff ───────────────────────────────────────────
+async function notifyTeam(phone, session, reason) {
+  const TEAM_NUMBER = process.env.TEAM_PHONE_NUMBER; // ex: "5562999999999"
+  if (!TEAM_NUMBER) return;
+
+  const alert = formatHandoffAlert(phone, session, reason);
+  await sendWhatsAppMessage(TEAM_NUMBER, alert);
 }
+
+// ─── CTA de agendamento ────────────────────────────────────────────────────────
+async function sendLeadCTA(phone, session) {
+  // Aguarda 2s para não parecer automático demais
+  await new Promise(r => setTimeout(r, 2000));
+  await sendWhatsAppMessage(
+    phone,
+    "📅 Posso agendar uma visita sem compromisso para você conhecer pessoalmente! Quer que eu passe para um consultor confirmar o melhor horário?"
+  );
+}
+
+// ─── Endpoint para o corretor retomar atendimento ─────────────────────────────
+app.post("/handoff/resolve/:phone", (req, res) => {
+  const phone = req.params.phone;
+  const session = sessionManager.get(phone);
+  session.waitingForHuman = false;
+  sessionManager.save(phone, session);
+  res.json({ ok: true, message: `Bot reativado para ${phone}` });
+});
+
+// ─── Status / health check ────────────────────────────────────────────────────
+app.get("/status", (req, res) => {
+  res.json({
+    status: "online",
+    sessions: sessionManager.count(),
+    uptime: process.uptime(),
+  });
+});
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🤖 Bot imobiliário rodando na porta", process.env.PORT || 3000);
+});
