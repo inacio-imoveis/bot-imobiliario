@@ -1,18 +1,5 @@
-{
-  "name": "whatsapp-bot-imobiliario",
-  "version": "2.0.0",
-  "description": "Bot WhatsApp com Claude",
-  "type": "module",
-  "main": "src/server.js",
-  "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "express": "^4.18.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
-}
+"main": "src/server.js",
+"scripts": {
+  "start": "node src/server.js",
+  "dev": "node --watch src/server.js"
+},
