@@ -6,7 +6,7 @@
 
 export const catalog = {
   construtora: {
-    nome: "Construtora Ricardo Inácio",
+    nome: "nome: "Ricardo Inácio Imóveis",
     cidade: "Goiânia/GO",
     whatsapp: "5562XXXXXXXXX",
     site: "www.suaconstrutora.com.br",
