@@ -1,6 +1,6 @@
 import express from "express";
 import Anthropic from "@anthropic-ai/sdk";
-import { catalog } from "../catalog/imoveis.js";
+import { catalog } from "./imoveis.js";
 import { sessionManager } from "./sessions.js";
 import { sendWhatsAppMessage, sendWhatsAppTemplate } from "./whatsapp.js";
 import { buildSystemPrompt } from "./prompt.js";
@@ -95,7 +95,7 @@ app.post("/webhook", async (req, res) => {
 
 // ─── Notificação interna de handoff ───────────────────────────────────────────
 async function notifyTeam(phone, session, reason) {
-  const TEAM_NUMBER = process.env.TEAM_PHONE_NUMBER; // ex: "5562999999999"
+  const TEAM_NUMBER = process.env.TEAM_PHONE_NUMBER;
   if (!TEAM_NUMBER) return;
 
   const alert = formatHandoffAlert(phone, session, reason);
@@ -104,7 +104,6 @@ async function notifyTeam(phone, session, reason) {
 
 // ─── CTA de agendamento ────────────────────────────────────────────────────────
 async function sendLeadCTA(phone, session) {
-  // Aguarda 2s para não parecer automático demais
   await new Promise(r => setTimeout(r, 2000));
   await sendWhatsAppMessage(
     phone,
