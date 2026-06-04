@@ -1,10 +1,5 @@
-import { formatCatalogForPrompt } from "../catalog/imoveis.js";
+import { formatCatalogForPrompt } from "./imoveis.js";
 
-/**
- * buildSystemPrompt(catalog)
- * Gera o system prompt injetando o catálogo atualizado.
- * Chamado a cada requisição para garantir dados frescos.
- */
 export function buildSystemPrompt(catalog) {
   const catalogText = formatCatalogForPrompt(catalog);
 
